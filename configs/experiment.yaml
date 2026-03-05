@@ -1,0 +1,32 @@
+random_state: 42
+test_size: 0.2
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+
+preparation:
+  missing_values:
+    alternatives: [median, knn]
+  scaling:
+    alternatives: [standard, minmax]
+  balancing:
+    alternatives: [oversample, undersample]
+
+modeling:
+  grids:
+    naive_bayes: {}
+    logistic_regression:
+      C: [0.01, 0.1, 1, 10]
+    knn:
+      n_neighbors: [3, 5, 7, 11, 15]
+      weights: [uniform, distance]
+    decision_tree:
+      max_depth: [3, 5, 10, 20, null]
+      min_samples_leaf: [1, 5, 10]
+      criterion: [gini, entropy]
+    random_forest:
+      n_estimators: [50, 100, 200]
+      max_depth: [10, 20, null]
+      max_features: [sqrt, log2]
+      min_samples_leaf: [1, 5]

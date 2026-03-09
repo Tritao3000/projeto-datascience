@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import itertools
+import ast
 
 import pandas as pd
 import numpy as np
@@ -51,21 +52,20 @@ def _param_combos(grid: dict):
         yield dict(zip(keys, vals))
 
 
-def train_model(model_class, params, X_train, y_train, X_test, y_test, extra=None):
+def train_model(model_class, params, X_train, y_train, X_eval, y_eval, extra=None):
     kw = dict(params)
     if extra:
         kw.update(extra)
-    # Convert None max_depth from YAML
     model = model_class(**kw)
     t0 = time.time()
     model.fit(X_train, y_train)
     train_time = time.time() - t0
-    metrics = evaluate_classifier(model, X_test, y_test)
+    metrics = evaluate_classifier(model, X_eval, y_eval)
     metrics["train_time"] = round(train_time, 2)
     return model, metrics
 
 
-def run_grid_search(model_name, param_grid, X_train, y_train, X_test, y_test):
+def run_grid_search(model_name, param_grid, X_train, y_train, X_val, y_val):
     model_class = MODEL_CLASSES[model_name]
     extra = EXTRA_KWARGS.get(model_name, {})
     results = []
@@ -77,7 +77,7 @@ def run_grid_search(model_name, param_grid, X_train, y_train, X_test, y_test):
 
     for i, params in enumerate(combos, 1):
         model, metrics = train_model(
-            model_class, params, X_train, y_train, X_test, y_test, extra
+            model_class, params, X_train, y_train, X_val, y_val, extra
         )
         row = {"model": model_name, "params": str(params), **metrics}
         results.append(row)
@@ -108,7 +108,7 @@ def plot_param_impact(results_df, model_name, param_grid, path):
         # Extract param value from the params string
         vals = []
         for _, row in model_rows.iterrows():
-            p = eval(row["params"])  # safe: we created these strings
+            p = ast.literal_eval(row["params"])
             vals.append(str(p.get(param, "N/A")))
         model_rows = model_rows.copy()
         model_rows["_param_val"] = vals
@@ -127,14 +127,14 @@ def plot_param_impact(results_df, model_name, param_grid, path):
 def main():
     # Load prepared data
     train_df = load_parquet(os.path.join(PROCESSED_DIR, "prepared_train.parquet"))
-    test_df = load_parquet(os.path.join(PROCESSED_DIR, "prepared_test.parquet"))
+    val_df = load_parquet(os.path.join(PROCESSED_DIR, "prepared_val.parquet"))
 
     target = "explicit"
     X_train = train_df.drop(columns=[target])
     y_train = train_df[target]
-    X_test = test_df.drop(columns=[target])
-    y_test = test_df[target]
-    print(f"Train: {X_train.shape}  Test: {X_test.shape}")
+    X_val = val_df.drop(columns=[target])
+    y_val = val_df[target]
+    print(f"Train: {X_train.shape}  Validation: {X_val.shape}")
 
     grids = CFG["modeling"]["grids"]
     all_results = []
@@ -144,7 +144,7 @@ def main():
         if param_grid is None:
             param_grid = {}
         results, best_model = run_grid_search(
-            model_name, param_grid, X_train, y_train, X_test, y_test
+            model_name, param_grid, X_train, y_train, X_val, y_val
         )
         all_results.extend(results)
         best_models[model_name] = best_model
@@ -168,8 +168,7 @@ def main():
     results_df.to_csv(results_path, index=False)
     print(f"\n  Saved {results_path}")
 
-    # Summary
-    print("\n--- Best Model per Family ---")
+    print("\n--- Best Model per Family (selected on validation) ---")
     for model_name in grids:
         model_rows = results_df[results_df["model"] == model_name]
         best = model_rows.loc[model_rows["f1"].idxmax()]

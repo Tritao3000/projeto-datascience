@@ -1,13 +1,14 @@
 """Step 3 — Stepwise NB-gated data preparation."""
 import os
 import sys
+import json
 
 import pandas as pd
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.utils.config import (
-    PROCESSED_DIR, ARTIFACTS_DIR, RANDOM_STATE, TEST_SIZE, CFG,
+    PROCESSED_DIR, ARTIFACTS_DIR, RANDOM_STATE, TEST_SIZE, VALIDATION_SIZE, CFG,
 )
 from src.utils.io import save_parquet, load_parquet
 from src.utils.metrics import evaluate_classifier
@@ -41,17 +42,43 @@ def compare_alternatives(results_dict, metric="f1"):
     return winner
 
 
+def save_split_indices(train_idx, val_idx, test_idx):
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    path = os.path.join(ARTIFACTS_DIR, "split_indices.npz")
+    np.savez_compressed(
+        path,
+        train_idx=np.asarray(train_idx),
+        val_idx=np.asarray(val_idx),
+        test_idx=np.asarray(test_idx),
+    )
+    print(f"  Saved {path}")
+
+
+def should_consider_scaling(X_train):
+    stds = X_train.std(numeric_only=True).replace(0, np.nan).dropna()
+    if stds.empty:
+        return False, "no varying numeric features"
+    spread_ratio = float(stds.max() / stds.min())
+    needs_scaling = spread_ratio >= 100
+    reason = f"feature std spread ratio={spread_ratio:.2f}"
+    return needs_scaling, reason
+
+
 # ---------------------------------------------------------------------------
 # Preparation steps
 # ---------------------------------------------------------------------------
 
-def apply_missing_values(X_train, X_test, strategy):
+def make_imputer(strategy):
     if strategy == "median":
-        imp = SimpleImputer(strategy="median")
+        return SimpleImputer(strategy="median")
     elif strategy == "knn":
-        imp = KNNImputer(n_neighbors=5)
+        return KNNImputer(n_neighbors=5)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
+
+
+def apply_missing_values(X_train, X_test, strategy):
+    imp = make_imputer(strategy)
     X_tr = pd.DataFrame(imp.fit_transform(X_train),
                          columns=X_train.columns, index=X_train.index)
     X_te = pd.DataFrame(imp.transform(X_test),
@@ -59,13 +86,17 @@ def apply_missing_values(X_train, X_test, strategy):
     return X_tr, X_te
 
 
-def apply_scaling(X_train, X_test, scaler_type):
+def make_scaler(scaler_type):
     if scaler_type == "standard":
-        scaler = StandardScaler()
+        return StandardScaler()
     elif scaler_type == "minmax":
-        scaler = MinMaxScaler()
+        return MinMaxScaler()
     else:
         raise ValueError(f"Unknown scaler: {scaler_type}")
+
+
+def apply_scaling(X_train, X_test, scaler_type):
+    scaler = make_scaler(scaler_type)
     X_tr = pd.DataFrame(scaler.fit_transform(X_train),
                          columns=X_train.columns, index=X_train.index)
     X_te = pd.DataFrame(scaler.transform(X_test),
@@ -112,50 +143,53 @@ def main():
     X = df.drop(columns=[target])
     y = df[target]
 
-    # Train/test split
-    X_train, X_test, y_train, y_test = train_test_split(
+    # Train/validation/test split
+    X_dev, X_test, y_dev, y_test = train_test_split(
         X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE
     )
-    print(f"Train: {X_train.shape}  Test: {X_test.shape}")
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_dev, y_dev, test_size=VALIDATION_SIZE, stratify=y_dev, random_state=RANDOM_STATE
+    )
+    print(f"Train: {X_train.shape}  Validation: {X_val.shape}  Test: {X_test.shape}")
     print(f"Train class balance: {y_train.value_counts(normalize=True).to_dict()}")
+    save_split_indices(X_train.index, X_val.index, X_test.index)
 
     all_results = []
+    selected_steps = {}
 
     # ------------------------------------------------------------------
     # Step 1: Missing Values
     # ------------------------------------------------------------------
     print("\n=== STEP 1: Missing Values ===")
-    has_missing = X_train.isnull().any().any()
+    has_missing = (
+        X_train.isnull().any().any()
+        or X_val.isnull().any().any()
+        or X_test.isnull().any().any()
+    )
     results_mv = {}
 
     if has_missing:
-        # Baseline: drop rows with missing (for NB comparison)
-        mask_tr = X_train.dropna().index
-        mask_te = X_test.dropna().index
-        results_mv["baseline_dropna"] = train_evaluate_nb(
-            X_train.loc[mask_tr], y_train.loc[mask_tr],
-            X_test.loc[mask_te], y_test.loc[mask_te],
-        )
-
         for alt in CFG["preparation"]["missing_values"]["alternatives"]:
             print(f"  Trying {alt} imputation …")
-            X_tr_imp, X_te_imp = apply_missing_values(X_train, X_test, alt)
-            results_mv[alt] = train_evaluate_nb(X_tr_imp, y_train, X_te_imp, y_test)
+            X_tr_imp, X_val_imp = apply_missing_values(X_train, X_val, alt)
+            results_mv[alt] = train_evaluate_nb(X_tr_imp, y_train, X_val_imp, y_val)
 
         winner_mv = compare_alternatives(results_mv)
-
-        # Apply winner
-        if winner_mv == "baseline_dropna":
-            X_train = X_train.loc[mask_tr]
-            y_train = y_train.loc[mask_tr]
-            X_test = X_test.loc[mask_te]
-            y_test = y_test.loc[mask_te]
-        else:
-            X_train, X_test = apply_missing_values(X_train, X_test, winner_mv)
+        imputer = make_imputer(winner_mv)
+        X_train = pd.DataFrame(
+            imputer.fit_transform(X_train), columns=X_train.columns, index=X_train.index
+        )
+        X_val = pd.DataFrame(
+            imputer.transform(X_val), columns=X_val.columns, index=X_val.index
+        )
+        X_test = pd.DataFrame(
+            imputer.transform(X_test), columns=X_test.columns, index=X_test.index
+        )
     else:
         print("  No missing values — skipping.")
-        results_mv["no_missing"] = train_evaluate_nb(X_train, y_train, X_test, y_test)
+        results_mv["no_missing"] = train_evaluate_nb(X_train, y_train, X_val, y_val)
         winner_mv = "no_missing"
+    selected_steps["missing_values"] = winner_mv
 
     for name, m in results_mv.items():
         all_results.append({"step": "missing_values", "alternative": name, **m})
@@ -165,32 +199,48 @@ def main():
     # ------------------------------------------------------------------
     print("\n=== STEP 2: Scaling ===")
     results_sc = {}
-    results_sc["unscaled"] = train_evaluate_nb(X_train, y_train, X_test, y_test)
+    should_scale, scale_reason = should_consider_scaling(X_train)
+    print(f"  Scaling check: {scale_reason}")
+    results_sc["unscaled"] = train_evaluate_nb(X_train, y_train, X_val, y_val)
 
-    for alt in CFG["preparation"]["scaling"]["alternatives"]:
-        print(f"  Trying {alt} scaling …")
-        X_tr_sc, X_te_sc = apply_scaling(X_train, X_test, alt)
-        results_sc[alt] = train_evaluate_nb(X_tr_sc, y_train, X_te_sc, y_test)
+    if should_scale:
+        for alt in CFG["preparation"]["scaling"]["alternatives"]:
+            print(f"  Trying {alt} scaling …")
+            X_tr_sc, X_val_sc = apply_scaling(X_train, X_val, alt)
+            results_sc[alt] = train_evaluate_nb(X_tr_sc, y_train, X_val_sc, y_val)
 
-    winner_sc = compare_alternatives(results_sc)
+        winner_sc = compare_alternatives(results_sc)
 
-    if winner_sc != "unscaled":
-        X_train, X_test = apply_scaling(X_train, X_test, winner_sc)
+        if winner_sc != "unscaled":
+            scaler = make_scaler(winner_sc)
+            X_train = pd.DataFrame(
+                scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index
+            )
+            X_val = pd.DataFrame(
+                scaler.transform(X_val), columns=X_val.columns, index=X_val.index
+            )
+            X_test = pd.DataFrame(
+                scaler.transform(X_test), columns=X_test.columns, index=X_test.index
+            )
+    else:
+        print("  Scaling not required — keeping unscaled data.")
+        winner_sc = "unscaled"
 
     for name, m in results_sc.items():
         all_results.append({"step": "scaling", "alternative": name, **m})
+    selected_steps["scaling"] = winner_sc
 
     # ------------------------------------------------------------------
     # Step 3: Balancing (train only)
     # ------------------------------------------------------------------
     print("\n=== STEP 3: Balancing ===")
     results_bal = {}
-    results_bal["unbalanced"] = train_evaluate_nb(X_train, y_train, X_test, y_test)
+    results_bal["unbalanced"] = train_evaluate_nb(X_train, y_train, X_val, y_val)
 
     for alt in CFG["preparation"]["balancing"]["alternatives"]:
         print(f"  Trying {alt} …")
         X_tr_bal, y_tr_bal = apply_balancing(X_train, y_train, alt)
-        results_bal[alt] = train_evaluate_nb(X_tr_bal, y_tr_bal, X_test, y_test)
+        results_bal[alt] = train_evaluate_nb(X_tr_bal, y_tr_bal, X_val, y_val)
 
     winner_bal = compare_alternatives(results_bal)
 
@@ -199,6 +249,7 @@ def main():
 
     for name, m in results_bal.items():
         all_results.append({"step": "balancing", "alternative": name, **m})
+    selected_steps["balancing"] = winner_bal
 
     # ------------------------------------------------------------------
     # Save outputs
@@ -206,10 +257,13 @@ def main():
     print("\nSaving prepared datasets …")
     train_df = X_train.copy()
     train_df["explicit"] = y_train.values
+    val_df = X_val.copy()
+    val_df["explicit"] = y_val.values
     test_df = X_test.copy()
     test_df["explicit"] = y_test.values
 
     save_parquet(train_df, os.path.join(PROCESSED_DIR, "prepared_train.parquet"))
+    save_parquet(val_df, os.path.join(PROCESSED_DIR, "prepared_val.parquet"))
     save_parquet(test_df, os.path.join(PROCESSED_DIR, "prepared_test.parquet"))
 
     results_df = pd.DataFrame(all_results)
@@ -218,12 +272,30 @@ def main():
     results_df.to_csv(results_path, index=False)
     print(f"  Saved {results_path}")
 
+    summary_path = os.path.join(ARTIFACTS_DIR, "preparation_summary.json")
+    summary = {
+        "split": {
+            "test_size": TEST_SIZE,
+            "validation_size": VALIDATION_SIZE,
+        },
+        "selected_steps": selected_steps,
+        "shapes": {
+            "train": list(X_train.shape),
+            "validation": list(X_val.shape),
+            "test": list(X_test.shape),
+        },
+    }
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"  Saved {summary_path}")
+
     print("\n--- Final Preparation Summary ---")
     print(f"  Missing values winner: {winner_mv}")
     print(f"  Scaling winner:        {winner_sc}")
     print(f"  Balancing winner:      {winner_bal}")
     print(f"  Final train shape: {X_train.shape}")
-    print(f"  Final test shape:  {X_test.shape}")
+    print(f"  Final validation shape: {X_val.shape}")
+    print(f"  Final test shape:       {X_test.shape}")
     print("Done.")
 
 

@@ -14,6 +14,7 @@ def load_config(path=CONFIG_PATH):
 CFG = load_config()
 RANDOM_STATE = CFG["random_state"]
 TEST_SIZE = CFG["test_size"]
+VALIDATION_SIZE = CFG["validation_size"]
 RAW_DIR = os.path.join(PROJECT_ROOT, CFG["data"]["raw_dir"])
 PROCESSED_DIR = os.path.join(PROJECT_ROOT, CFG["data"]["processed_dir"])
 ARTIFACTS_DIR = os.path.join(PROJECT_ROOT, "artifacts")

@@ -14,7 +14,7 @@ albums["release_date"] = pd.to_datetime(albums["release_date"], errors="coerce")
 albums["release_year"] = albums["release_date"].dt.year
 albums["release_month"] = albums["release_date"].dt.month
 
-# album_type (becomes n separate binary columns with n being each type of album (album, single, compilation...)
+# album_type (becomes n separate binary columns with n being each type of album (album, single, compilation)
 # 1- belongs to that category)
 albums = pd.get_dummies(albums, columns=["album_type"], dtype=int)
 
@@ -22,8 +22,7 @@ albums = pd.get_dummies(albums, columns=["album_type"], dtype=int)
 artists["artist_genres"] = artists["artist_genres"].fillna("") # turns missing genres into an empty string
 
 artists["n_genres"] = artists["artist_genres"].apply(
-    lambda x: 0 if str(x).strip() == "" else len([g.strip() for g in str(x).split("|") if g.strip()])
-)
+    lambda x: 0 if str(x).strip() == "" else len([g.strip() for g in str(x).split("|") if g.strip()]))
 
 # Datasets merge (training)
 train_dataframe = train_labels.merge(tracks, on = "track_id", how = "left") # left to keep the samples defined in 
@@ -42,6 +41,11 @@ test_dataframe = test_dataframe.merge(artists, on = "artist_id", how = "left")
 # removal of non-numeric columns
 train_df_numeric= train_dataframe.drop(columns = ["explicit"]).select_dtypes(include = [np.number]) # keeps only numeric 
 # variables and also removes explicit since it is what we want to predict
-test_df_numeric = test_dataframe.select_dtypes(include =[np.number])
+train_label = train_dataframe["explicit"].astype(int)
+test_df_numeric = test_dataframe.select_dtypes(include =[np.number]) # class we want to predict
+
+print(train_df_numeric.keys())
+print(train_df_numeric.head())
+
 
 
